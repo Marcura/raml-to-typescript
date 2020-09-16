@@ -1,0 +1,525 @@
+#!/usr/bin/env php
+<?php
+include "vendor/autoload.php";
+
+if ($argc < 2) {
+  die("Please execute with syntax - php download-schema <namespace> <raml-url> <output-directory='./dist'> <overrides-file-path>");
+}
+
+function validateDirectory($directory) {
+  if (file_exists($directory) && !is_dir($directory)) {
+    die("$directory must be a directory.");
+  }
+}
+
+function validateOutputStructure($directory) {
+  validateDirectory($directory);
+  validateDirectory("$directory/" . DtoType::$DIR);
+  validateDirectory("$directory/" . EnumType::$DIR);
+}
+
+function initDirectory($directory) {
+  if (!file_exists($directory)) {
+    mkdir($directory);
+  }
+}
+function initOutputStructure($directory) {
+  initDirectory($directory);
+  initDirectory("$directory/" . DtoType::$DIR);
+  initDirectory("$directory/" . EnumType::$DIR);
+}
+
+class Import {
+  private $_name;
+  private $_path;
+  public function __construct($name, $path) {
+    $this->_name = $name;
+    $this->_path = $path;
+  }
+
+  public function getPath(): string {
+    return $this->_path;
+  }
+
+  public function toTypescript(): string {
+    return "import {{$this->_name}} from '{$this->_path}';\n";
+  }
+}
+
+class Property {
+  private $_name;
+  private $_type;
+  private $_isRequired = false;
+
+  public function __construct(
+    $name,
+    Type $type
+  )
+  {
+    $this->_name = $name;
+    $this->_type = $type;
+  }
+
+  public function getType(): Type {
+    return $this->_type;
+  }
+
+  public function markRequired() {
+    $this->_isRequired = true;
+  }
+
+  public function toTypescript(): string
+  {
+    $optional = $this->_isRequired ? '' : '?';
+    return "  $this->_name$optional: {$this->_type->getName()};\n";
+  }
+}
+
+interface IType {
+  public function getName(): string;
+}
+
+abstract class Type {
+  private $_name;
+
+  public function __construct($name) {
+    $this->_name = $name;
+  }
+
+  public function getName(): string {
+    return $this->_name;
+  }
+}
+
+interface ISaveableType extends IType {
+  public function getFileName(): string;
+  public function toTypeScript(): string;
+}
+
+interface IImportableType extends IType {
+  public function getImport();
+}
+
+class SimpleType extends Type {
+  public function __construct($name) {
+    parent::__construct($name);
+  }
+}
+
+class ExternalDefinitionType extends Type implements IImportableType {
+  private $_import;
+
+  public function __construct($path, $name, $importName = null) {
+    parent::__construct($name);
+    $this->_import = new Import($importName ?: $name, $path);
+  }
+
+  public function getImport(): Import
+  {
+    return $this->_import;
+  }
+}
+
+class DtoType extends Type implements ISaveableType, IImportableType {
+  public static $DIR = 'dto';
+
+  /**
+   * @var Property[]
+   */
+  private $_properties;
+
+  /**
+   * @var string;
+   */
+  private $_fileName;
+
+  /**
+   * @var string;
+   */
+  private $_namespace;
+
+  /**
+   * @var Import
+   */
+  private $_import;
+
+  public function __construct($namespace, $fileName) {
+    $this->_fileName = $this->_createFilename($fileName);
+    parent::__construct($this->_createName($fileName));
+    $this->_namespace = $namespace;
+    $this->_properties = $properties = [];
+    $this->_import = new Import(
+      $this->getName(),
+      "{$this->_namespace}/{$this->getFileName()}"
+    );
+  }
+
+  public function getFileName(): string {
+    return $this->_fileName;
+  }
+
+  public function getImport(): Import {
+    return $this->_import;
+  }
+
+  public function setProperties(array $value) {
+    $this->_properties = $value;
+  }
+
+  public function toTypescript(): string {
+    $imports = implode('', array_map(function (Import $import) {return $import->toTypescript();}, $this->_getImports()));
+
+    $definition = "export interface {$this->getName()} {\n"
+      . implode('', array_map(function ($property) { return $property->toTypescript(); }, $this->_properties))
+      . "}\n";
+
+    return $imports ? "$imports\n$definition" : $definition;
+  }
+
+  private function _createFilename($fileName): string {
+    $fileName = str_replace(".schema", ".dto", $fileName);
+    return self::$DIR . "/$fileName";
+  }
+
+  private function _createName($fileName) {
+    $fileName = str_replace(".schema", ".dto", $fileName);
+    $fileName = str_replace('.', '-', $fileName);
+    $parts = explode('-', $fileName);
+    return implode('', array_map(
+      function($part) {
+        return ucfirst($part);
+      }, $parts
+    ));
+  }
+
+  /**
+   * @return Import[]
+   */
+  private function _getImports(): array {
+    /**
+     * @var Import[]
+     */
+    $result = [];
+    $currentImport = $this->getImport();
+    foreach ($this->_properties as $property) {
+      $type = $property->getType();
+      if (!($type instanceof IImportableType)) {
+        continue;
+      }
+      $import = $type->getImport();
+      if (!$import) {
+        continue;
+      }
+      if ($import !== $currentImport && array_search($import, $result) === false) {
+        $result[] = $import;
+      }
+    }
+    usort($result, function (Import $a, Import $b) {
+      if ($a->getPath() === $b->getPath()) {
+        return 0;
+      }
+
+      return $a->getPath() > $b->getPath() ? 1 : -1;
+    });
+    return $result;
+  }
+}
+
+class EnumType extends Type implements ISaveableType, IImportableType {
+  public static $DIR = 'enums';
+
+  /**
+   * @var string;
+   */
+  private $_fileName;
+
+  /**
+   * @var string;
+   */
+  private $_namespace;
+
+  private $_values;
+
+  private $_import;
+
+  public function __construct($namespace, $fileName, $values) {
+    $this->_fileName = $this->_createFilename($fileName);
+
+    parent::__construct($this->_createName($fileName));
+
+    $this->_namespace = $namespace;
+    $this->_values = [];
+    foreach ($values as $value) {
+      $this->_values[$this->_getEnumField($value)] = $value;
+    }
+    $this->_import = new Import(
+      $this->getName(),
+      "{$this->_namespace}/{$this->getFileName()}"
+    );
+  }
+
+  public function getFileName(): string
+  {
+    return $this->_fileName;
+  }
+
+  public function getImport(): Import {
+    return $this->_import;
+  }
+
+  public function toTypescript(): string {
+    $result = "export enum {$this->getName()} {\n";
+
+    foreach ($this->_values as $field => $value) {
+      $result .= "  $field = '$value',\n";
+    }
+
+    return "$result}\n";
+  }
+
+  private function _createFilename($fileName): string {
+    $fileName = str_replace(".schema", ".enum", $fileName);
+    return self::$DIR . "/$fileName";
+  }
+
+  private function _createName($fileName): string {
+    $fileName = str_replace('.schema', '', $fileName);
+    $fileName = str_replace('.', '-', $fileName);
+    $parts = explode('-', $fileName);
+    return implode('', array_map(
+      function($part) {
+        return ucfirst($part);
+      }, $parts
+    ));
+  }
+
+  private function _getEnumField($value) {
+    $value = str_replace(['(', ')', '[', ']', "'"], ' ', $value);
+    $value = preg_replace('/[^A-Za-z0-9\s]/', ' ', $value);
+    $parts = explode(' ', $value);
+    return implode('', array_map(
+      function($part) {
+        return ucfirst($part);
+      }, $parts
+    ));
+  }
+}
+
+class ArrayType extends Type implements IImportableType {
+  private $_type;
+
+  public function __construct(Type $type) {
+    parent::__construct("{$type->getName()}[]");
+    $this->_type = $type;
+  }
+
+  public function toTypescript(): string {
+    return $this->getName();
+  }
+
+  public function getImport() {
+    return $this->_type instanceof IImportableType ? $this->_type->getImport() : null;
+  }
+}
+
+class TypeBuilder {
+  private $_simpleTypes;
+  private $_loadedReferences;
+  private $_namespace;
+
+  public function __construct($namespace, $externalDefinitions)
+  {
+    $number = new SimpleType("number");
+    $this->_simpleTypes = [
+      "integer" => $number,
+      "number" => $number,
+      "float" => $number,
+      "string" => new SimpleType("string"),
+      "boolean" => new SimpleType("boolean")
+    ];
+    $this->_namespace = $namespace;
+    $this->_loadedReferences = [];
+    foreach ($externalDefinitions as $url => $definition) {
+      $this->_loadedReferences[$url] = new ExternalDefinitionType(
+        $definition->path,
+        $definition->name,
+        isset($definition->importName) ? $definition->importName : null
+      );
+    }
+  }
+
+  public function loadRaml($url) {
+    $raml = Symfony\Component\Yaml\Yaml::parse(file_get_contents($url));
+    foreach ($raml['types'] as $type => $ref) {
+      $referenceUrl = str_replace("!include ", "", $ref);
+      $this->loadReference($referenceUrl);
+    }
+  }
+
+  public function getSaveableTypes(): array {
+    $result = [];
+
+    foreach ($this->_loadedReferences as $url => $type) {
+      if ($type instanceof ISaveableType) {
+        $result[] = $type;
+      }
+    }
+
+    return $result;
+  }
+
+  public function loadReference($url): Type {
+    if (!array_key_exists($url, $this->_loadedReferences)) {
+      echo "loading $url \n";
+      $schema = json_decode(file_get_contents($url));
+
+      $this->_loadedReferences[$url] = $this->getType($schema);
+    }
+
+    return $this->_loadedReferences[$url];
+  }
+
+  public function getType($schema, $self = null): Type {
+    $type = $schema->type;
+    if ($this->_isSelfReference($schema)) {
+      return $self;
+    }
+
+    if ($type === "object" || isset($schema->properties) || isset($schema->enum)) {
+      return $this->_getObjectType($schema, $self);
+    }
+
+    if ($type === "array") {
+      return $this->_getArrayType($schema, $self);
+    }
+
+    if (array_key_exists($type, $this->_simpleTypes)) {
+      return $this->_simpleTypes[$type];
+    }
+
+    throw new Error("$type is not supported");
+  }
+
+  private function _getObjectType($schema, $self = null): Type {
+    if (isset($schema->{'$ref'})) {
+      return $this->loadReference($schema->{'$ref'});
+    }
+    if (isset($schema->id)) {
+      if (array_key_exists($schema->id, $this->_loadedReferences)) {
+        return $this->_loadedReferences[$schema->id];
+      }
+    }
+
+    if (isset($schema->properties)) {
+      return $this->_getDtoType($schema, $self);
+    }
+
+    if (isset($schema->enum)) {
+      return $this->_getEnumType($schema);
+    }
+
+    var_dump($schema);
+    throw new Error("Schema is not supported");
+  }
+
+  private function _isSelfReference($schema): bool {
+    return isset($schema->{'$ref'}) && $schema->{'$ref'} === '#';
+  }
+
+  private function _getDtoType($schema, $self = null): Type {
+    if (!isset($schema->id)) {
+      var_dump($schema);
+      echo "Inline schemas are not supported yet - please contact Krzysztof Furmaga (k.furmaga@xt.marcura.com) if you need this.";
+      die();
+    }
+    $url = $schema->id;
+
+    $properties = [];
+
+    $type = new DtoType(
+      $this->_namespace,
+      $this->_getFileName($url)
+    );
+
+    $self = $self ?: $type;
+
+    foreach ($schema->properties as $key => $value) {
+      $property = new Property(
+        $key,
+        $this->_isSelfReference($value) ? $self : $this->getType($value, $self)
+      );
+
+      if (isset($schema->required) && array_search($key, $schema->required) !== false) {
+        $property->markRequired();
+      }
+
+      $properties[] = $property;
+    }
+
+    $type->setProperties($properties);
+
+    $this->_loadedReferences[$url] = $type;
+
+    return $type;
+  }
+
+  private function _getEnumType($schema): Type {
+    if (!isset($schema->id)) {
+      return new SimpleType(
+        implode(' | ', array_map(function ($value) {return "'$value'"; }, $schema->enum))
+      );
+    }
+
+    $url = $schema->id;
+
+    $this->_loadedReferences[$url] = new EnumType(
+      $this->_namespace,
+      $this->_getFileName($url),
+      $schema->enum
+    );
+
+    return $this->_loadedReferences[$url];
+  }
+
+  private function _getArrayType($schema, $self = null): Type {
+    $type = $this->getType($schema->items, $self);
+    return new ArrayType($type);
+  }
+
+  private function _getFileName($url) {
+    $parts = explode('/', $url);
+    return str_replace('.json', '', end($parts));
+  }
+}
+
+$namespace = $argv[1];
+$url = $argv[2];
+$output = isset($argv[3]) ? $argv[3] : './dist';
+$overrides = isset($argv[4]) ? json_decode(file_get_contents($argv[4])) : new stdClass();
+
+validateOutputStructure($output);
+
+$builder = new TypeBuilder($namespace, $overrides);
+
+$urlInfo = pathinfo($url);
+$extension = explode('?', $urlInfo['extension'])[0];
+
+if ($extension === 'raml') {
+  $builder->loadRaml($url);
+} else if ($extension === 'json') {
+  $builder->loadReference($url);
+}
+
+initOutputStructure($output);
+
+$savedFiles = [];
+
+foreach ($builder->getSaveableTypes() as $saveableType) {
+  $path = "$output/{$saveableType->getFileName()}.ts";
+  if (array_search($path, $savedFiles) !== false) {
+    echo "WARNING!: found duplicate on $path";
+  } else {
+    echo "saving {$saveableType->getName()} to $path\n";
+    file_put_contents($path, $saveableType->toTypescript());
+  }
+}
