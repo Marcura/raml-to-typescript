@@ -97,7 +97,7 @@ interface ISaveableType extends IType {
 }
 
 interface IImportableType extends IType {
-  public function getImport();
+  public function getImports();
 }
 
 class SimpleType extends Type {
@@ -114,9 +114,9 @@ class ExternalDefinitionType extends Type implements IImportableType {
     $this->_import = new Import($importName ?: $name, $path);
   }
 
-  public function getImport(): Import
+  public function getImports(): array
   {
-    return $this->_import;
+    return [$this->_import];
   }
 }
 
@@ -158,8 +158,8 @@ class DtoType extends Type implements ISaveableType, IImportableType {
     return $this->_fileName;
   }
 
-  public function getImport(): Import {
-    return $this->_import;
+  public function getImports(): array {
+    return [$this->_import];
   }
 
   public function setProperties(array $value) {
@@ -200,18 +200,15 @@ class DtoType extends Type implements ISaveableType, IImportableType {
      * @var Import[]
      */
     $result = [];
-    $currentImport = $this->getImport();
     foreach ($this->_properties as $property) {
       $type = $property->getType();
       if (!($type instanceof IImportableType)) {
         continue;
       }
-      $import = $type->getImport();
-      if (!$import) {
-        continue;
-      }
-      if ($import !== $currentImport && array_search($import, $result) === false) {
-        $result[] = $import;
+      foreach ($type->getImports() as $import) {
+        if ($import !== $this->_import && array_search($import, $result) === false) {
+          $result[] = $import;
+        }
       }
     }
     usort($result, function (Import $a, Import $b) {
@@ -263,8 +260,8 @@ class EnumType extends Type implements ISaveableType, IImportableType {
     return $this->_fileName;
   }
 
-  public function getImport(): Import {
-    return $this->_import;
+  public function getImports(): array {
+    return [$this->_import];
   }
 
   public function toTypescript(): string {
@@ -317,8 +314,64 @@ class ArrayType extends Type implements IImportableType {
     return $this->getName();
   }
 
-  public function getImport() {
-    return $this->_type instanceof IImportableType ? $this->_type->getImport() : null;
+  public function getImports() {
+    return $this->_type instanceof IImportableType ? $this->_type->getImports() : [];
+  }
+}
+
+class InlineType extends Type {
+
+  /**
+   * @var Property[]
+   */
+  private $_properties;
+
+  public function __construct() {
+    parent::__construct('');
+  }
+
+  public function setProperties(array $value) {
+    $this->_properties = $value;
+  }
+
+  public function getName(): string
+  {
+    return $this->toTypescript();
+  }
+
+  public function toTypescript(): string {
+    return "{\n"
+      . implode('', array_map(function ($property) { return $property->toTypescript(); }, $this->_properties))
+      . "}\n";
+  }
+
+  /**
+   * @return Import[]
+   */
+  public function getImports(): array {
+    /**
+     * @var Import[]
+     */
+    $result = [];
+    foreach ($this->_properties as $property) {
+      $type = $property->getType();
+      if (!($type instanceof IImportableType)) {
+        continue;
+      }
+      foreach ($type->getImports() as $import) {
+        if (array_search($import, $result) === false) {
+          $result[] = $import;
+        }
+      }
+    }
+    usort($result, function (Import $a, Import $b) {
+      if ($a->getPath() === $b->getPath()) {
+        return 0;
+      }
+
+      return $a->getPath() > $b->getPath() ? 1 : -1;
+    });
+    return $result;
   }
 }
 
@@ -411,7 +464,7 @@ class TypeBuilder {
     }
 
     if (isset($schema->properties)) {
-      return $this->_getDtoType($schema, $self);
+      return !isset($schema->id) ? $this->_getInlineType($schema, $self) : $this->_getDtoType($schema, $self);
     }
 
     if (isset($schema->enum)) {
@@ -434,14 +487,31 @@ class TypeBuilder {
     }
     $url = $schema->id;
 
-    $properties = [];
 
     $type = new DtoType(
       $this->_namespace,
       $this->_getFileName($url)
     );
 
-    $self = $self ?: $type;
+    $properties = $this->_getProperties($schema, $self ?: $type);
+    $type->setProperties($properties);
+
+    $this->_loadedReferences[$url] = $type;
+
+    return $type;
+  }
+
+  private function _getInlineType($schema, $self = null): Type {
+    var_dump($schema);
+    $type = new InlineType();
+    $properties = $this->_getProperties($schema, $self ?: $type);
+    $type->setProperties($properties);
+
+    return $type;
+  }
+
+  private function _getProperties($schema, $self = null): array {
+    $properties = [];
 
     foreach ($schema->properties as $key => $value) {
       $property = new Property(
@@ -456,11 +526,7 @@ class TypeBuilder {
       $properties[] = $property;
     }
 
-    $type->setProperties($properties);
-
-    $this->_loadedReferences[$url] = $type;
-
-    return $type;
+    return $properties;
   }
 
   private function _getEnumType($schema): Type {
