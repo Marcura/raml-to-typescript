@@ -433,10 +433,10 @@ class TypeBuilder {
   }
 
   public function getType($schema, $self = null): Type {
-    $type = $schema->type;
     if ($this->_isSelfReference($schema)) {
       return $self;
     }
+    $type = isset($schema->type) ? $schema->type : "object";
 
     if ($type === "object" || isset($schema->properties) || isset($schema->enum)) {
       return $this->_getObjectType($schema, $self);
@@ -548,7 +548,9 @@ class TypeBuilder {
   }
 
   private function _getArrayType($schema, $self = null): Type {
-    $type = $this->getType($schema->items, $self);
+    $type = isset($schema->{'$ref'})
+      ? $this->loadReference($schema->{'$ref'})
+      : $this->getType($schema->items, $self);
     return new ArrayType($type);
   }
 
