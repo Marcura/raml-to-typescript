@@ -14,7 +14,7 @@ function validateDirectory($directory) {
 
 function validateOutputStructure($directory) {
   validateDirectory($directory);
-  validateDirectory("$directory/" . DtoType::$DIR);
+  validateDirectory("$directory/" . SchemaType::$DIR);
   validateDirectory("$directory/" . EnumType::$DIR);
 }
 
@@ -25,7 +25,7 @@ function initDirectory($directory) {
 }
 function initOutputStructure($directory) {
   initDirectory($directory);
-  initDirectory("$directory/" . DtoType::$DIR);
+  initDirectory("$directory/" . SchemaType::$DIR);
   initDirectory("$directory/" . EnumType::$DIR);
 }
 
@@ -120,13 +120,18 @@ class ExternalDefinitionType extends Type implements IImportableType {
   }
 }
 
-class DtoType extends Type implements ISaveableType, IImportableType {
-  public static $DIR = 'dto';
+class SchemaType extends Type implements ISaveableType, IImportableType {
+  public static $DIR = 'schemas';
 
   /**
    * @var Property[]
    */
   private $_properties;
+
+  /**
+   * @var string
+   */
+  private $_url;
 
   /**
    * @var string;
@@ -143,7 +148,8 @@ class DtoType extends Type implements ISaveableType, IImportableType {
    */
   private $_import;
 
-  public function __construct($namespace, $fileName) {
+  public function __construct($url, $namespace, $fileName) {
+    $this->_url = $url;
     $this->_fileName = $this->_createFilename($fileName);
     parent::__construct($this->_createName($fileName));
     $this->_namespace = $namespace;
@@ -169,7 +175,8 @@ class DtoType extends Type implements ISaveableType, IImportableType {
   public function toTypescript(): string {
     $imports = implode('', array_map(function (Import $import) {return $import->toTypescript();}, $this->_getImports()));
 
-    $definition = "export interface {$this->getName()} {\n"
+    $definition = "// {$this->_url}\n"
+      . "export interface {$this->getName()} {\n"
       . implode('', array_map(function ($property) { return $property->toTypescript(); }, $this->_properties))
       . "}\n";
 
@@ -177,12 +184,10 @@ class DtoType extends Type implements ISaveableType, IImportableType {
   }
 
   private function _createFilename($fileName): string {
-    $fileName = str_replace(".schema", ".dto", $fileName);
     return self::$DIR . "/$fileName";
   }
 
   private function _createName($fileName) {
-    $fileName = str_replace(".schema", ".dto", $fileName);
     $fileName = str_replace('.', '-', $fileName);
     $parts = explode('-', $fileName);
     return implode('', array_map(
@@ -228,6 +233,11 @@ class EnumType extends Type implements ISaveableType, IImportableType {
   /**
    * @var string;
    */
+  private $_url;
+
+  /**
+   * @var string;
+   */
   private $_fileName;
 
   /**
@@ -239,7 +249,8 @@ class EnumType extends Type implements ISaveableType, IImportableType {
 
   private $_import;
 
-  public function __construct($namespace, $fileName, $values) {
+  public function __construct($url, $namespace, $fileName, $values) {
+    $this->_url = $url;
     $this->_fileName = $this->_createFilename($fileName);
 
     parent::__construct($this->_createName($fileName));
@@ -265,7 +276,8 @@ class EnumType extends Type implements ISaveableType, IImportableType {
   }
 
   public function toTypescript(): string {
-    $result = "export enum {$this->getName()} {\n";
+    $result = "// {$this->_url}\n"
+      . "export enum {$this->getName()} {\n";
 
     foreach ($this->_values as $field => $value) {
       $result .= "  $field = '$value',\n";
@@ -403,6 +415,7 @@ class TypeBuilder {
 
   public function loadRaml($url) {
     $raml = Symfony\Component\Yaml\Yaml::parse(file_get_contents($url));
+
     foreach ($raml['types'] as $type => $ref) {
       $referenceUrl = str_replace("!include ", "", $ref);
       $this->loadReference($referenceUrl);
@@ -464,7 +477,7 @@ class TypeBuilder {
     }
 
     if (isset($schema->properties)) {
-      return !isset($schema->id) ? $this->_getInlineType($schema, $self) : $this->_getDtoType($schema, $self);
+      return !isset($schema->id) ? $this->_getInlineType($schema, $self) : $this->_getSchemaType($schema, $self);
     }
 
     if (isset($schema->enum)) {
@@ -479,7 +492,7 @@ class TypeBuilder {
     return isset($schema->{'$ref'}) && $schema->{'$ref'} === '#';
   }
 
-  private function _getDtoType($schema, $self = null): Type {
+  private function _getSchemaType($schema, $self = null): Type {
     if (!isset($schema->id)) {
       var_dump($schema);
       echo "Inline schemas are not supported yet - please contact Krzysztof Furmaga (k.furmaga@xt.marcura.com) if you need this.";
@@ -488,7 +501,8 @@ class TypeBuilder {
     $url = $schema->id;
 
 
-    $type = new DtoType(
+    $type = new SchemaType(
+      $url,
       $this->_namespace,
       $this->_getFileName($url)
     );
@@ -539,6 +553,7 @@ class TypeBuilder {
     $url = $schema->id;
 
     $this->_loadedReferences[$url] = new EnumType(
+      $url,
       $this->_namespace,
       $this->_getFileName($url),
       $schema->enum
