@@ -7,8 +7,7 @@ FROM php:7.4.9
 # copy the Composer PHAR from the Composer image into the PHP image
 COPY --from=composer /usr/bin/composer /usr/bin/composer
 
-## Add git repository
-#RUN apt-get update --fix-missing && apt-get install -y software-properties-common && add-apt-repository ppa:git-core/ppa -y && apt-get install -y --no-install-recommends git
+## Add packages
 RUN apt-get update\
     && apt-get install -y --no-install-recommends git\
     libzip-dev\
