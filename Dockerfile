@@ -23,4 +23,4 @@ WORKDIR /opt2/${APP_NAME}
 # show that both Composer and PHP run as expected
 #RUN composer --version && php -v
 
-ENTRYPOINT ["sh", "-c", "composer install && php download-schema @app/api \"https://raw.githubusercontent.com/Marcura/dadesk-module-table-management/master/src/main/resources/tablemanagement-api.raml?token=GHSAT0AAAAAACCOR7KJHMBFZFBUQWJ3SSLCZFPO2DQ\" ./src/app/api"]
+ENTRYPOINT ["sh", "-c", "composer install && php download-schema @app/api \"https://raw.githubusercontent.com/Marcura/dadesk-module-table-management/master/src/main/resources/tablemanagement-api.raml?token=GHSAT0AAAAAACCOR7KJRG2X7ETEOQONSZDCZFRLAOA\" ./schema-ts-files"]
